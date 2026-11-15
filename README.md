@@ -13,9 +13,18 @@
 
 **Seerr** is a free and open source software application for managing requests for your media library. It integrates with the media server of your choice: [Jellyfin](https://jellyfin.org), [Plex](https://plex.tv), and [Emby](https://emby.media/). In addition, it integrates with your existing services, such as **[Sonarr](https://sonarr.tv/)**, **[Radarr](https://radarr.video/)**.
 
+## About This Fork
+
+This fork adds native **OpenID Connect (OIDC)** authentication support to Seerr, built upon the upstream PR work in [`michaelhthomas:feat/oidc-login-basic`](https://github.com/michaelhthomas/seerr/tree/feat/oidc-login-basic) ([PR #2715](https://github.com/seerr-team/seerr/pull/2715)).
+
+- **OIDC Authentication**: Native OpenID Connect login support.
+- **Automated Upstream Sync**: Automatically tracks and merges new upstream tagged releases to stay up to date.
+- **Automated Container Releases**: Continuously builds and publishes version-tagged images to the [GitHub Container Registry (GHCR)](https://github.com/t0ggl/seerr/pkgs/container/seerr).
+
 ## Current Features
 
 - Full Jellyfin/Emby/Plex integration including authentication with user import & management.
+- Native OpenID Connect (OIDC) authentication.
 - Support for **PostgreSQL** and **SQLite** databases.
 - Supports Movies, Shows and Mixed Libraries.
 - Ability to change email addresses for SMTP purposes.
