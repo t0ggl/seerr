@@ -11,6 +11,7 @@ import {
   extractGroupsFromUserInfo,
   hasOidcAdminGroup,
   syncOidcAdminPermission,
+  syncOidcUserEmail,
 } from '@server/lib/oidc';
 import { Permission } from '@server/lib/permissions';
 import { getSettings } from '@server/lib/settings';
@@ -985,10 +986,7 @@ authRoutes.get('/oidc/login/:slug', async (req, res, next) => {
   const callbackUrl = getOidcRedirectUrl(req);
 
   let requestedScopes = provider.scopes ?? 'openid profile email';
-  if (
-    provider.adminGroup &&
-    !requestedScopes.split(/\s+/).includes('groups')
-  ) {
+  if (provider.adminGroup && !requestedScopes.split(/\s+/).includes('groups')) {
     requestedScopes = `${requestedScopes} groups`.trim();
   }
 
@@ -1223,6 +1221,46 @@ authRoutes.post(
         await linkedAccountsRepository.save(newLinkedAccount);
       }
 
+      let userModified = false;
+
+      // Update user's email if provided by OIDC
+      if (fullUserInfo.email != null) {
+        const normalizedEmail = fullUserInfo.email.trim().toLowerCase();
+        if (req.user.email !== normalizedEmail) {
+          const existingUserWithEmail = await userRepository.findOne({
+            where: { email: normalizedEmail },
+          });
+
+          if (
+            !existingUserWithEmail ||
+            existingUserWithEmail.id === req.user.id
+          ) {
+            if (syncOidcUserEmail(req.user, fullUserInfo.email)) {
+              userModified = true;
+              logger.info(
+                `Updated email for user ${req.user.id} to ${req.user.email} via OIDC`,
+                {
+                  label: 'Auth',
+                  provider: provider.slug,
+                  userId: req.user.id,
+                  email: req.user.email,
+                }
+              );
+            }
+          } else {
+            logger.warn(
+              `Cannot update email for user ${req.user.id} to ${normalizedEmail} via OIDC: email already in use by user ${existingUserWithEmail.id}`,
+              {
+                label: 'Auth',
+                provider: provider.slug,
+                userId: req.user.id,
+                email: normalizedEmail,
+              }
+            );
+          }
+        }
+      }
+
       if (provider.adminGroup) {
         const isMember = hasOidcAdminGroup(
           fullUserInfo,
@@ -1244,7 +1282,7 @@ authRoutes.post(
           }
         );
         if (syncOidcAdminPermission(req.user, isMember)) {
-          await userRepository.save(req.user);
+          userModified = true;
           logger.info(
             `${isMember ? 'Granted' : 'Revoked'} admin permissions for user ${req.user.email ?? req.user.id} via OIDC group sync`,
             {
@@ -1255,6 +1293,10 @@ authRoutes.post(
             }
           );
         }
+      }
+
+      if (userModified) {
+        await userRepository.save(req.user);
       }
 
       return res.sendStatus(204);
@@ -1344,6 +1386,43 @@ authRoutes.post(
       });
     }
 
+    let userModified = false;
+
+    // Update user's email if provided by OIDC
+    if (fullUserInfo.email != null) {
+      const normalizedEmail = fullUserInfo.email.trim().toLowerCase();
+      if (user.email !== normalizedEmail) {
+        const existingUserWithEmail = await userRepository.findOne({
+          where: { email: normalizedEmail },
+        });
+
+        if (!existingUserWithEmail || existingUserWithEmail.id === user.id) {
+          if (syncOidcUserEmail(user, fullUserInfo.email)) {
+            userModified = true;
+            logger.info(
+              `Updated email for user ${user.id} to ${user.email} via OIDC login`,
+              {
+                label: 'Auth',
+                provider: provider.slug,
+                userId: user.id,
+                email: user.email,
+              }
+            );
+          }
+        } else {
+          logger.warn(
+            `Cannot update email for user ${user.id} to ${normalizedEmail} via OIDC login: email already in use by user ${existingUserWithEmail.id}`,
+            {
+              label: 'Auth',
+              provider: provider.slug,
+              userId: user.id,
+              email: normalizedEmail,
+            }
+          );
+        }
+      }
+    }
+
     // Sync admin permissions if provider has adminGroup configured
     if (provider.adminGroup) {
       const isMember = hasOidcAdminGroup(
@@ -1366,7 +1445,7 @@ authRoutes.post(
         }
       );
       if (syncOidcAdminPermission(user, isMember)) {
-        await userRepository.save(user);
+        userModified = true;
         logger.info(
           `${isMember ? 'Granted' : 'Revoked'} admin permissions for user ${user.email ?? user.id} via OIDC group sync`,
           {
@@ -1377,6 +1456,10 @@ authRoutes.post(
           }
         );
       }
+    }
+
+    if (userModified) {
+      await userRepository.save(user);
     }
 
     // Set logged in session and return

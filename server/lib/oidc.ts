@@ -108,3 +108,26 @@ export const syncOidcAdminPermission = (
 
   return false;
 };
+
+/**
+ * Synchronizes email for a user based on OIDC user claims.
+ *
+ * If email is provided and differs from the user's current email, updates user.email.
+ * Returns true if the user's email was modified, false otherwise.
+ */
+export const syncOidcUserEmail = (
+  user: User,
+  email?: string | null
+): boolean => {
+  if (!email) {
+    return false;
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  if (user.email !== normalizedEmail) {
+    user.email = normalizedEmail;
+    return true;
+  }
+
+  return false;
+};

@@ -3,6 +3,7 @@ import {
   extractGroupsFromUserInfo,
   hasOidcAdminGroup,
   syncOidcAdminPermission,
+  syncOidcUserEmail,
 } from '@server/lib/oidc';
 import { Permission } from '@server/lib/permissions';
 import assert from 'node:assert/strict';
@@ -157,6 +158,64 @@ describe('OIDC group utilities', () => {
       const modified = syncOidcAdminPermission(user, false);
       assert.equal(modified, false);
       assert.equal((user.permissions & Permission.ADMIN) !== 0, true);
+    });
+  });
+
+  describe('syncOidcUserEmail', () => {
+    it('updates email when user email was blank', () => {
+      const user = new User({
+        id: 1,
+        email: '',
+      });
+
+      const modified = syncOidcUserEmail(user, 'user@example.com');
+      assert.equal(modified, true);
+      assert.equal(user.email, 'user@example.com');
+    });
+
+    it('updates email when user had a non-email string like username', () => {
+      const user = new User({
+        id: 1,
+        email: 'jellyfinuser',
+      });
+
+      const modified = syncOidcUserEmail(user, 'jellyfin@example.com');
+      assert.equal(modified, true);
+      assert.equal(user.email, 'jellyfin@example.com');
+    });
+
+    it('normalizes email by trimming and lowercasing', () => {
+      const user = new User({
+        id: 1,
+        email: 'old@example.com',
+      });
+
+      const modified = syncOidcUserEmail(user, '  NewEmail@EXAMPLE.com  ');
+      assert.equal(modified, true);
+      assert.equal(user.email, 'newemail@example.com');
+    });
+
+    it('does not modify user when email is identical', () => {
+      const user = new User({
+        id: 1,
+        email: 'user@example.com',
+      });
+
+      const modified = syncOidcUserEmail(user, 'user@example.com');
+      assert.equal(modified, false);
+      assert.equal(user.email, 'user@example.com');
+    });
+
+    it('does not modify user when email is null or undefined or empty', () => {
+      const user = new User({
+        id: 1,
+        email: 'user@example.com',
+      });
+
+      assert.equal(syncOidcUserEmail(user, undefined), false);
+      assert.equal(syncOidcUserEmail(user, null), false);
+      assert.equal(syncOidcUserEmail(user, ''), false);
+      assert.equal(user.email, 'user@example.com');
     });
   });
 });

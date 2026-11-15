@@ -991,8 +991,9 @@ describe('OpenID Connect', () => {
   /**
    * Performs the login + callback flow and returns the callback response.
    */
-  async function performOidcCallback() {
-    const loginResponse = await request(app)
+  async function performOidcCallback(agent?: ReturnType<typeof request.agent>) {
+    const caller = agent ?? request(app);
+    const loginResponse = await caller
       .get('/auth/oidc/login/test')
       .set('Accept', 'application/json');
 
@@ -1001,13 +1002,22 @@ describe('OpenID Connect', () => {
     const redirectUrl = new URL(loginResponse.body.redirectUrl);
     const state = redirectUrl.searchParams.get('state');
 
-    const cookies = loginResponse.get('Set-Cookie');
-    assert.notStrictEqual(cookies, undefined);
-    const cookieHeader = cookies!.map((c) => c.split(';')[0]).join('; ');
-
     const callbackUrl = new URL(OIDC_REDIRECT_URL);
     callbackUrl.searchParams.set('code', '123456');
     if (state) callbackUrl.searchParams.set('state', state);
+
+    if (agent) {
+      const response = await agent
+        .post('/auth/oidc/callback/test')
+        .set('Accept', 'application/json')
+        .send({ callbackUrl: callbackUrl.toString() });
+
+      return response;
+    }
+
+    const cookies = loginResponse.get('Set-Cookie');
+    assert.notStrictEqual(cookies, undefined);
+    const cookieHeader = cookies!.map((c) => c.split(';')[0]).join('; ');
 
     const response = await request(app)
       .post('/auth/oidc/callback/test')
@@ -1623,6 +1633,151 @@ describe('OpenID Connect', () => {
         (createdUser.permissions & Permission.ADMIN) !== 0,
         true
       );
+    });
+  });
+
+  describe('user email synchronization', function () {
+    beforeEach(() => {
+      fetchMock.hardReset();
+    });
+
+    afterEach(() => {
+      fetchMock.hardReset();
+    });
+
+    it('updates user email on login when existing linked user has a different email', async function () {
+      const userRepo = getRepository(User);
+      const linkedAccountRepo = getRepository(LinkedAccount);
+
+      const user = await userRepo.save(
+        new User({
+          email: 'jellyfin-username-without-at',
+          username: 'jellyfinuser',
+          avatar: 'http://example.com/avatar.png',
+          permissions: Permission.REQUEST,
+          userType: UserType.JELLYFIN,
+        })
+      );
+
+      const linkedAccount = new LinkedAccount({
+        user,
+        provider: 'test',
+        sub: 'email-sync-login-sub',
+        username: 'jellyfinuser',
+      });
+      await linkedAccountRepo.save(linkedAccount);
+
+      const claims = {
+        ...DEFAULT_CLAIMS,
+        sub: 'email-sync-login-sub',
+        email: 'synced-email@example.com',
+      };
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        idTokenClaims: claims,
+        userinfoResponse: claims,
+      });
+
+      const response = await performOidcCallback();
+      assert.strictEqual(response.status, 204);
+
+      const updatedUser = await userRepo.findOneOrFail({
+        where: { id: user.id },
+      });
+      assert.strictEqual(updatedUser.email, 'synced-email@example.com');
+    });
+
+    it('updates user email on account linking when user links OIDC account', async function () {
+      const userRepo = getRepository(User);
+
+      // Create an authenticated local user whose email is not set to an email address (e.g. username)
+      const user = await userRepo.save(
+        new User({
+          email: 'unlinked-local-user',
+          username: 'unlinked-local-user',
+          avatar: 'http://example.com/avatar.png',
+          password:
+            '$2b$12$Z5V2P5HZgmx4/AnWFMZN1.aD5AM1NucNi.mhNTSQ9oVtmdzu7Le/a', // 'test1234'
+          permissions: Permission.REQUEST,
+          userType: UserType.LOCAL,
+        })
+      );
+
+      const agent = await authenticatedAgent('unlinked-local-user', 'test1234');
+
+      const claims = {
+        ...DEFAULT_CLAIMS,
+        sub: 'email-sync-link-sub',
+        email: 'linked-user@example.com',
+      };
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        idTokenClaims: claims,
+        userinfoResponse: claims,
+      });
+
+      const response = await performOidcCallback(agent);
+      assert.strictEqual(response.status, 204);
+
+      const updatedUser = await userRepo.findOneOrFail({
+        where: { id: user.id },
+      });
+      assert.strictEqual(updatedUser.email, 'linked-user@example.com');
+    });
+
+    it('does not overwrite email if another user already has that email', async function () {
+      const userRepo = getRepository(User);
+      const linkedAccountRepo = getRepository(LinkedAccount);
+
+      // User 1 has 'admin@seerr.dev'
+      // Create user 2 with a different email
+      const user2 = await userRepo.save(
+        new User({
+          email: 'user2@seerr.dev',
+          username: 'user2',
+          avatar: 'http://example.com/avatar.png',
+          permissions: Permission.REQUEST,
+          userType: UserType.LOCAL,
+        })
+      );
+
+      const linkedAccount = new LinkedAccount({
+        user: user2,
+        provider: 'test',
+        sub: 'user2-colliding-sub',
+        username: 'user2',
+      });
+      await linkedAccountRepo.save(linkedAccount);
+
+      // OIDC claims user 2's email is 'admin@seerr.dev' (which belongs to user 1)
+      const claims = {
+        ...DEFAULT_CLAIMS,
+        sub: 'user2-colliding-sub',
+        email: 'admin@seerr.dev',
+      };
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        idTokenClaims: claims,
+        userinfoResponse: claims,
+      });
+
+      const response = await performOidcCallback();
+      assert.strictEqual(response.status, 204);
+
+      // User 2's email should not have changed to admin@seerr.dev
+      const updatedUser2 = await userRepo.findOneOrFail({
+        where: { id: user2.id },
+      });
+      assert.strictEqual(updatedUser2.email, 'user2@seerr.dev');
+
+      // User 1's email is still admin@seerr.dev
+      const user1 = await userRepo.findOneOrFail({
+        where: { id: 1 },
+      });
+      assert.strictEqual(user1.email, 'admin@seerr.dev');
     });
   });
 });
