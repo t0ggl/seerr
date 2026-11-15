@@ -1,0 +1,119 @@
+name: Sync Upstream Releases
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: 'Force merge a specific upstream tag (e.g. v3.5.3)'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  check-and-sync:
+    name: Check & Sync Upstream Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      actions: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: feat/oidc-login-basic
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine latest upstream release tag
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ github.event.inputs.force_tag }}" ]; then
+            TAG="${{ github.event.inputs.force_tag }}"
+            echo "Forcing tag: $TAG"
+          else
+            TAG=$(gh api repos/seerr-team/seerr/releases/latest --jq '.tag_name')
+            echo "Latest upstream release tag: $TAG"
+          fi
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "Failed to fetch upstream release tag"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch upstream tags and refs
+        run: |
+          git remote add upstream https://github.com/seerr-team/seerr.git || git remote set-url upstream https://github.com/seerr-team/seerr.git
+          git fetch upstream --tags
+
+      - name: Check if already merged
+        id: check
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && git merge-base --is-ancestor "$TAG" HEAD; then
+            echo "Branch is already up-to-date with upstream $TAG."
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New upstream release $TAG found! Proceeding with merge."
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream release
+        if: steps.check.outputs.needs_sync == 'true'
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          echo "Attempting to merge $TAG..."
+          if git merge --no-edit -m "chore(upstream): merge release $TAG into feat/oidc-login-basic" "$TAG"; then
+            echo "Merge succeeded cleanly."
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Merge conflict detected!"
+            git merge --abort || true
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push merged branch and tag
+        if: steps.check.outputs.needs_sync == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          OIDC_TAG="${TAG}-oidc"
+
+          echo "Pushing updated branch to origin..."
+          git push origin feat/oidc-login-basic
+
+          echo "Creating and pushing tag $OIDC_TAG..."
+          git tag -a "$OIDC_TAG" -m "Release $TAG with OIDC support"
+          git push origin "$OIDC_TAG"
+
+          echo "Triggering GHCR build workflow..."
+          gh workflow run build-ghcr.yml --ref feat/oidc-login-basic || true
+
+      - name: Notify on merge conflict
+        if: steps.check.outputs.needs_sync == 'true' && steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          TITLE="Merge conflict syncing upstream release $TAG"
+          BODY="Automated sync detected a new upstream release \`$TAG\`, but a merge conflict occurred when merging into \`feat/oidc-login-basic\`. Please resolve the conflicts manually."
+          gh issue create --title "$TITLE" --body "$BODY" --label "bug" || true
+          exit 1
