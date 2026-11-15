@@ -1,6 +1,7 @@
 import { MediaServerType } from '@server/constants/server';
 import { Permission } from '@server/lib/permissions';
 import { runMigrations } from '@server/lib/settings/migrator';
+import logger from '@server/logger';
 import type { AvailableLocale } from '@server/types/languages';
 import { randomBytes, randomUUID } from 'crypto';
 import fs from 'fs/promises';
@@ -641,6 +642,7 @@ class Settings {
       } else {
         this.data = mergeSettings(this.data, overrideSettings);
       }
+      this.applyOidcEnvOverrides();
       return this;
     }
 
@@ -687,6 +689,9 @@ class Settings {
       const vapidKeys = webpush.generateVAPIDKeys();
       this.data.vapidPrivate = vapidKeys.privateKey;
       this.data.vapidPublic = vapidKeys.publicKey;
+      change = true;
+    }
+    if (this.applyOidcEnvOverrides()) {
       change = true;
     }
     if (change) {
@@ -951,6 +956,152 @@ class Settings {
       },
       migrations: [],
     };
+    this.applyOidcEnvOverrides();
+  }
+
+  private applyOidcEnvOverrides(): boolean {
+    let changed = false;
+
+    if (!this.data.oidc) {
+      this.data.oidc = { providers: [] };
+      changed = true;
+    }
+    if (!this.data.oidc.providers) {
+      this.data.oidc.providers = [];
+      changed = true;
+    }
+
+    // Configure applicationUrl if provided in environment
+    const envAppUrl = process.env.APPLICATION_URL || process.env.APP_URL;
+    if (envAppUrl && this.data.main.applicationUrl !== envAppUrl.trim()) {
+      this.data.main.applicationUrl = envAppUrl.trim();
+      changed = true;
+    }
+
+    let envConfiguredProvider = false;
+
+    // Parse OIDC_PROVIDERS (JSON array of OidcProvider objects)
+    if (process.env.OIDC_PROVIDERS) {
+      try {
+        const parsed = JSON.parse(process.env.OIDC_PROVIDERS);
+        if (Array.isArray(parsed)) {
+          for (const p of parsed) {
+            if (p && typeof p === 'object' && p.issuerUrl && p.clientId) {
+              const slug = (p.slug || 'oidc').trim();
+              const existingIndex = this.data.oidc.providers.findIndex(
+                (existing) => existing.slug === slug
+              );
+              const provider: OidcProvider = {
+                slug,
+                name: (p.name || 'OpenID Connect').trim(),
+                issuerUrl: p.issuerUrl.trim(),
+                clientId: p.clientId.trim(),
+                clientSecret: p.clientSecret || '',
+                scopes: p.scopes || 'openid profile email',
+                newUserLogin:
+                  p.newUserLogin !== undefined ? !!p.newUserLogin : true,
+                ...(p.logo ? { logo: p.logo } : {}),
+                ...(p.requiredClaims
+                  ? { requiredClaims: p.requiredClaims }
+                  : {}),
+              };
+
+              if (existingIndex >= 0) {
+                this.data.oidc.providers[existingIndex] = {
+                  ...this.data.oidc.providers[existingIndex],
+                  ...provider,
+                };
+              } else {
+                this.data.oidc.providers.push(provider);
+              }
+              changed = true;
+              envConfiguredProvider = true;
+            }
+          }
+        }
+      } catch (e) {
+        logger.error('Failed to parse OIDC_PROVIDERS environment variable', {
+          label: 'Settings',
+          error: e instanceof Error ? e.message : 'Unknown error',
+        });
+      }
+    }
+
+    // Parse individual OIDC provider environment variables
+    const issuerUrl = process.env.OIDC_ISSUER_URL?.trim();
+    const clientId = process.env.OIDC_CLIENT_ID?.trim();
+    if (issuerUrl || clientId) {
+      const slug = (
+        process.env.OIDC_PROVIDER_SLUG ||
+        process.env.OIDC_SLUG ||
+        'oidc'
+      ).trim();
+      const name = (
+        process.env.OIDC_PROVIDER_NAME ||
+        process.env.OIDC_NAME ||
+        'OpenID Connect'
+      ).trim();
+      const clientSecret = process.env.OIDC_CLIENT_SECRET || '';
+      const scopes = process.env.OIDC_SCOPES || 'openid profile email';
+      const logo = process.env.OIDC_LOGO;
+      const requiredClaims = process.env.OIDC_REQUIRED_CLAIMS;
+      const newUserLogin =
+        process.env.OIDC_NEW_USER_LOGIN !== undefined
+          ? ['true', '1', 'yes'].includes(
+              process.env.OIDC_NEW_USER_LOGIN.toLowerCase().trim()
+            )
+          : true;
+
+      const provider: OidcProvider = {
+        slug,
+        name,
+        issuerUrl: issuerUrl || '',
+        clientId: clientId || '',
+        clientSecret,
+        scopes,
+        newUserLogin,
+        ...(logo ? { logo } : {}),
+        ...(requiredClaims ? { requiredClaims } : {}),
+      };
+
+      const existingIndex = this.data.oidc.providers.findIndex(
+        (p) => p.slug === slug
+      );
+      if (existingIndex >= 0) {
+        this.data.oidc.providers[existingIndex] = {
+          ...this.data.oidc.providers[existingIndex],
+          ...provider,
+        };
+      } else {
+        this.data.oidc.providers.push(provider);
+      }
+      changed = true;
+      envConfiguredProvider = true;
+    }
+
+    // Configure main.oidcLogin boolean
+    const envOidcEnabled =
+      process.env.OIDC_LOGIN_ENABLED ??
+      process.env.OIDC_ENABLED ??
+      process.env.OIDC_LOGIN;
+
+    if (envOidcEnabled !== undefined) {
+      const isEnabled = ['true', '1', 'yes'].includes(
+        envOidcEnabled.toLowerCase().trim()
+      );
+      if (this.data.main.oidcLogin !== isEnabled) {
+        this.data.main.oidcLogin = isEnabled;
+        changed = true;
+      }
+    } else if (envConfiguredProvider) {
+      // Auto-enable OIDC login if provider was configured via environment variables
+      if (!this.data.main.oidcLogin) {
+        this.data.main.oidcLogin = true;
+        changed = true;
+      }
+    }
+
+    return changed;
   }
 }
 
