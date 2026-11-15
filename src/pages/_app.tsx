@@ -265,6 +265,7 @@ CoreApp.getInitialProps = async (initialProps) => {
     versionCheck: true,
     plexClientIdentifier: '',
     openIdProviders: [],
+    oidcAutoRedirectProvider: undefined,
   };
 
   if (ctx.res) {

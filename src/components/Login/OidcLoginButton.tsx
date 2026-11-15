@@ -1,4 +1,5 @@
 import ButtonWithLoader from '@app/components/Common/ButtonWithLoader';
+import useSettings from '@app/hooks/useSettings';
 import {
   clearOidcProviderSlug,
   getOidcErrorMessage,
@@ -22,6 +23,7 @@ export default function OidcLoginButton({
 }: OidcLoginButtonProps) {
   const intl = useIntl();
   const router = useRouter();
+  const settings = useSettings();
   const { query } = router;
 
   const [loading, setLoading] = useState(false);
@@ -47,7 +49,7 @@ export default function OidcLoginButton({
     if (result.type === 'success') {
       router.push('/');
     } else {
-      router.replace('/login');
+      router.replace({ pathname: '/login', query: { manual: 'true' } });
       setLoading(false);
       onError?.(getOidcErrorMessage(result.errorCode, provider.name, intl));
     }
@@ -64,8 +66,15 @@ export default function OidcLoginButton({
         clearOidcProviderSlug();
         handleCallback();
       }
-      // Support direct redirect via ?provider=slug query param
-      else if (!isCallback && query.provider === provider.slug) {
+      // Support direct redirect via ?provider=slug query param or auto-redirect setting
+      else if (
+        !isCallback &&
+        query.manual !== 'true' &&
+        (query.provider === provider.slug ||
+          (query.provider == null &&
+            settings.currentSettings.oidcAutoRedirectProvider ===
+              provider.slug))
+      ) {
         redirectToLogin();
       }
     },

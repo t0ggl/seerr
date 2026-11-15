@@ -245,6 +245,7 @@ interface FullPublicSettings extends PublicSettings {
   versionCheck: boolean;
   plexClientIdentifier: string;
   openIdProviders: PublicOidcProvider[];
+  oidcAutoRedirectProvider?: string;
 }
 
 export interface NotificationAgentConfig {
@@ -550,6 +551,19 @@ class Settings {
             logo: p.logo,
           }))
         : [],
+      oidcAutoRedirectProvider: (() => {
+        if (!this.data.main.oidcLogin || !this.data.oidc.providers.length) {
+          return undefined;
+        }
+        const val = process.env.OIDC_AUTO_REDIRECT?.trim();
+        if (!val || val === 'false' || val === '0') {
+          return undefined;
+        }
+        if (val === 'true' || val === '1') {
+          return this.data.oidc.providers[0]?.slug;
+        }
+        return val;
+      })(),
     };
   }
 

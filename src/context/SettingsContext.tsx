@@ -35,6 +35,7 @@ const defaultSettings: PublicSettingsResponse = {
   versionCheck: true,
   plexClientIdentifier: '',
   openIdProviders: [],
+  oidcAutoRedirectProvider: undefined,
 };
 
 export const SettingsContext = React.createContext<SettingsContextProps>({

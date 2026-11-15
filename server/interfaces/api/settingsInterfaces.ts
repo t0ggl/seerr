@@ -53,6 +53,7 @@ export interface PublicSettingsResponse {
   versionCheck: boolean;
   plexClientIdentifier: string;
   openIdProviders: PublicOidcProvider[];
+  oidcAutoRedirectProvider?: string;
 }
 
 export interface CacheItem {
