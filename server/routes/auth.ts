@@ -7,6 +7,11 @@ import { getRepository } from '@server/datasource';
 import { LinkedAccount } from '@server/entity/LinkedAccount';
 import { User } from '@server/entity/User';
 import { startJobs } from '@server/job/schedule';
+import {
+  extractGroupsFromUserInfo,
+  hasOidcAdminGroup,
+  syncOidcAdminPermission,
+} from '@server/lib/oidc';
 import { Permission } from '@server/lib/permissions';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -979,9 +984,17 @@ authRoutes.get('/oidc/login/:slug', async (req, res, next) => {
 
   const callbackUrl = getOidcRedirectUrl(req);
 
+  let requestedScopes = provider.scopes ?? 'openid profile email';
+  if (
+    provider.adminGroup &&
+    !requestedScopes.split(/\s+/).includes('groups')
+  ) {
+    requestedScopes = `${requestedScopes} groups`.trim();
+  }
+
   const parameters: Record<string, string> = {
     redirect_uri: callbackUrl.toString(),
-    scope: provider.scopes ?? 'openid profile email',
+    scope: requestedScopes,
     code_challenge,
     code_challenge_method: 'S256',
   };
@@ -1210,6 +1223,40 @@ authRoutes.post(
         await linkedAccountsRepository.save(newLinkedAccount);
       }
 
+      if (provider.adminGroup) {
+        const isMember = hasOidcAdminGroup(
+          fullUserInfo,
+          provider.adminGroup,
+          provider.groupClaim
+        );
+        const userGroups = extractGroupsFromUserInfo(
+          fullUserInfo,
+          provider.groupClaim
+        );
+        logger.info(
+          `OIDC admin group check for user ${req.user.email ?? req.user.id}: isMember=${isMember}, adminGroup='${provider.adminGroup}', detectedGroups=[${userGroups.join(', ')}]`,
+          {
+            label: 'Auth',
+            provider: provider.slug,
+            userId: req.user.id,
+            adminGroup: provider.adminGroup,
+            groups: userGroups,
+          }
+        );
+        if (syncOidcAdminPermission(req.user, isMember)) {
+          await userRepository.save(req.user);
+          logger.info(
+            `${isMember ? 'Granted' : 'Revoked'} admin permissions for user ${req.user.email ?? req.user.id} via OIDC group sync`,
+            {
+              label: 'Auth',
+              provider: provider.slug,
+              userId: req.user.id,
+              adminGroup: provider.adminGroup,
+            }
+          );
+        }
+      }
+
       return res.sendStatus(204);
     }
 
@@ -1238,11 +1285,36 @@ authRoutes.post(
         fullUserInfo.picture ??
         gravatarUrl(normalizedEmail, { default: 'mm', size: 200 });
 
+      let initialPermissions = settings.main.defaultPermissions;
+      if (provider.adminGroup) {
+        const isMember = hasOidcAdminGroup(
+          fullUserInfo,
+          provider.adminGroup,
+          provider.groupClaim
+        );
+        const userGroups = extractGroupsFromUserInfo(
+          fullUserInfo,
+          provider.groupClaim
+        );
+        logger.info(
+          `OIDC admin group check for new user ${normalizedEmail}: isMember=${isMember}, adminGroup='${provider.adminGroup}', detectedGroups=[${userGroups.join(', ')}]`,
+          {
+            label: 'Auth',
+            provider: provider.slug,
+            adminGroup: provider.adminGroup,
+            groups: userGroups,
+          }
+        );
+        if (isMember) {
+          initialPermissions |= Permission.ADMIN;
+        }
+      }
+
       user = new User({
         avatar: avatar,
         username: fullUserInfo.preferred_username,
         email: normalizedEmail,
-        permissions: settings.main.defaultPermissions,
+        permissions: initialPermissions,
         plexToken: '',
         userType: UserType.LOCAL,
       });
@@ -1270,6 +1342,41 @@ authRoutes.post(
           ? ApiErrorCode.OidcMissingEmail
           : ApiErrorCode.Unauthorized,
       });
+    }
+
+    // Sync admin permissions if provider has adminGroup configured
+    if (provider.adminGroup) {
+      const isMember = hasOidcAdminGroup(
+        fullUserInfo,
+        provider.adminGroup,
+        provider.groupClaim
+      );
+      const userGroups = extractGroupsFromUserInfo(
+        fullUserInfo,
+        provider.groupClaim
+      );
+      logger.info(
+        `OIDC admin group check for user ${user.email ?? user.id}: isMember=${isMember}, adminGroup='${provider.adminGroup}', detectedGroups=[${userGroups.join(', ')}]`,
+        {
+          label: 'Auth',
+          provider: provider.slug,
+          userId: user.id,
+          adminGroup: provider.adminGroup,
+          groups: userGroups,
+        }
+      );
+      if (syncOidcAdminPermission(user, isMember)) {
+        await userRepository.save(user);
+        logger.info(
+          `${isMember ? 'Granted' : 'Revoked'} admin permissions for user ${user.email ?? user.id} via OIDC group sync`,
+          {
+            label: 'Auth',
+            provider: provider.slug,
+            userId: user.id,
+            adminGroup: provider.adminGroup,
+          }
+        );
+      }
     }
 
     // Set logged in session and return

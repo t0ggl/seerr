@@ -75,6 +75,18 @@ Space-separated list of boolean claims that are required to log in
 
 Create accounts for new users logging in with this provider
 
+### Admin Group (`adminGroup`)
+
+Optional group or role name. When specified, any user belonging to this group in their OIDC claims will automatically be granted administrator privileges in Seerr upon login or account linking. If a user is subsequently removed from this group in the identity provider, their administrator privileges in Seerr will be automatically revoked upon their next login (with the exception of User ID 1 / instance owner, who is always protected from demotion).
+
+Can also be configured globally or per-provider via the `OIDC_ADMIN_GROUP` environment variable.
+
+### Group Claim (`groupClaim`)
+
+Optional claim path in the OIDC `userinfo` or token claims from which group memberships should be extracted (e.g. `groups`, `roles`, or nested paths like `realm_access.roles`). Defaults to checking `groups`, `roles`, and `realm_access.roles`.
+
+Can also be configured via the `OIDC_GROUP_CLAIM` environment variable.
+
 ## Provider Setup
 
 Most OpenID Connect providers follow the same basic setup pattern:

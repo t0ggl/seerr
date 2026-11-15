@@ -72,6 +72,8 @@ export type OidcProvider = {
   requiredClaims?: string;
   scopes?: string;
   newUserLogin?: boolean;
+  adminGroup?: string;
+  groupClaim?: string;
 };
 
 export type PublicOidcProvider = Pick<OidcProvider, 'slug' | 'name' | 'logo'>;
@@ -1018,6 +1020,8 @@ class Settings {
                 ...(p.requiredClaims
                   ? { requiredClaims: p.requiredClaims }
                   : {}),
+                ...(p.adminGroup ? { adminGroup: p.adminGroup.trim() } : {}),
+                ...(p.groupClaim ? { groupClaim: p.groupClaim.trim() } : {}),
               };
 
               if (existingIndex >= 0) {
@@ -1056,7 +1060,12 @@ class Settings {
         'OpenID Connect'
       ).trim();
       const clientSecret = process.env.OIDC_CLIENT_SECRET || '';
-      const scopes = process.env.OIDC_SCOPES || 'openid profile email';
+      const adminGroup = process.env.OIDC_ADMIN_GROUP?.trim();
+      const groupClaim = process.env.OIDC_GROUP_CLAIM?.trim();
+      const defaultScopes = adminGroup
+        ? 'openid profile email groups'
+        : 'openid profile email';
+      const scopes = process.env.OIDC_SCOPES || defaultScopes;
       const logo = process.env.OIDC_LOGO;
       const requiredClaims = process.env.OIDC_REQUIRED_CLAIMS;
       const newUserLogin =
@@ -1076,6 +1085,8 @@ class Settings {
         newUserLogin,
         ...(logo ? { logo } : {}),
         ...(requiredClaims ? { requiredClaims } : {}),
+        ...(adminGroup ? { adminGroup } : {}),
+        ...(groupClaim ? { groupClaim } : {}),
       };
 
       const existingIndex = this.data.oidc.providers.findIndex(
@@ -1091,6 +1102,33 @@ class Settings {
       }
       changed = true;
       envConfiguredProvider = true;
+    }
+
+    // Support OIDC_ADMIN_GROUP and OIDC_GROUP_CLAIM when providers are already configured
+    const envAdminGroup = process.env.OIDC_ADMIN_GROUP?.trim();
+    const envGroupClaim = process.env.OIDC_GROUP_CLAIM?.trim();
+    if (envAdminGroup && this.data.oidc.providers.length > 0) {
+      const slug = (
+        process.env.OIDC_PROVIDER_SLUG ||
+        process.env.OIDC_SLUG ||
+        'oidc'
+      ).trim();
+      const targetProvider =
+        this.data.oidc.providers.find((p) => p.slug === slug) ??
+        (this.data.oidc.providers.length === 1
+          ? this.data.oidc.providers[0]
+          : undefined);
+
+      if (targetProvider) {
+        if (targetProvider.adminGroup !== envAdminGroup) {
+          targetProvider.adminGroup = envAdminGroup;
+          changed = true;
+        }
+        if (envGroupClaim && targetProvider.groupClaim !== envGroupClaim) {
+          targetProvider.groupClaim = envGroupClaim;
+          changed = true;
+        }
+      }
     }
 
     // Configure main.oidcLogin boolean

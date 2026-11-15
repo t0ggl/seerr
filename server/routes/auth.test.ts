@@ -18,6 +18,7 @@ import { LinkedAccount } from '@server/entity/LinkedAccount';
 import { User } from '@server/entity/User';
 import PreparedEmail from '@server/lib/email';
 import ImageProxy from '@server/lib/imageproxy';
+import { Permission } from '@server/lib/permissions';
 import { getSettings } from '@server/lib/settings';
 import { checkUser } from '@server/middleware/auth';
 import { setupTestDb } from '@server/test/db';
@@ -1355,6 +1356,272 @@ describe('OpenID Connect', () => {
       assert.strictEqual(
         response.body.error,
         ApiErrorCode.OidcAuthorizationFailed
+      );
+    });
+  });
+
+  describe('admin group synchronization', function () {
+    beforeEach(() => {
+      fetchMock.hardReset();
+    });
+
+    afterEach(() => {
+      fetchMock.hardReset();
+    });
+
+    it('grants admin permission to newly registered user when matching admin group is present in claims', async function () {
+      const settings = getSettings();
+      settings.oidc.providers[0].adminGroup = 'admin';
+      settings.oidc.providers[0].newUserLogin = true;
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        userinfoResponse: {
+          ...DEFAULT_CLAIMS,
+          email: 'newadmin@example.com',
+          sub: 'newadmin-sub',
+          groups: ['users', 'admin'],
+        },
+        idTokenClaims: {
+          ...DEFAULT_CLAIMS,
+          email: 'newadmin@example.com',
+          sub: 'newadmin-sub',
+        },
+      });
+
+      const response = await performOidcCallback();
+      assert.strictEqual(response.status, 204);
+
+      const userRepo = getRepository(User);
+      const createdUser = await userRepo.findOneOrFail({
+        where: { email: 'newadmin@example.com' },
+      });
+      assert.strictEqual(
+        (createdUser.permissions & Permission.ADMIN) !== 0,
+        true
+      );
+    });
+
+    it('does not grant admin permission to newly registered user without admin group', async function () {
+      const settings = getSettings();
+      settings.oidc.providers[0].adminGroup = 'admin';
+      settings.oidc.providers[0].newUserLogin = true;
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        userinfoResponse: {
+          ...DEFAULT_CLAIMS,
+          email: 'newregular@example.com',
+          sub: 'newregular-sub',
+          groups: ['users'],
+        },
+        idTokenClaims: {
+          ...DEFAULT_CLAIMS,
+          email: 'newregular@example.com',
+          sub: 'newregular-sub',
+        },
+      });
+
+      const response = await performOidcCallback();
+      assert.strictEqual(response.status, 204);
+
+      const userRepo = getRepository(User);
+      const createdUser = await userRepo.findOneOrFail({
+        where: { email: 'newregular@example.com' },
+      });
+      assert.strictEqual(
+        (createdUser.permissions & Permission.ADMIN) === 0,
+        true
+      );
+    });
+
+    it('promotes existing user when admin group is added in OIDC', async function () {
+      const userRepo = getRepository(User);
+      const linkedAccountRepo = getRepository(LinkedAccount);
+
+      const claims = {
+        sub: 'promoteme-sub',
+        email: 'promoteme@example.com',
+        groups: ['admin'],
+      };
+
+      // Create a non-admin user
+      const user = await userRepo.save(
+        new User({
+          email: 'promoteme@example.com',
+          username: 'promoteme',
+          avatar: 'http://example.com/avatar.png',
+          permissions: Permission.REQUEST,
+          userType: UserType.LOCAL,
+        })
+      );
+
+      const linkedAccount = new LinkedAccount({
+        user,
+        provider: 'test',
+        sub: 'promoteme-sub',
+        username: 'promoteme',
+      });
+      await linkedAccountRepo.save(linkedAccount);
+
+      const settings = getSettings();
+      settings.oidc.providers[0].adminGroup = 'admin';
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        idTokenClaims: claims,
+        userinfoResponse: claims,
+      });
+
+      const response = await performOidcCallback();
+      assert.strictEqual(response.status, 204);
+
+      const updatedUser = await userRepo.findOneOrFail({
+        where: { id: user.id },
+      });
+      assert.strictEqual(
+        (updatedUser.permissions & Permission.ADMIN) !== 0,
+        true
+      );
+      assert.strictEqual(
+        (updatedUser.permissions & Permission.REQUEST) !== 0,
+        true
+      );
+    });
+
+    it('demotes existing user from admin when admin group is removed', async function () {
+      const userRepo = getRepository(User);
+      const linkedAccountRepo = getRepository(LinkedAccount);
+
+      const claims = {
+        sub: 'demoteme-sub',
+        email: 'demoteme@example.com',
+        groups: ['regular_users'],
+      };
+
+      // Create an admin user (ID != 1)
+      const user = await userRepo.save(
+        new User({
+          email: 'demoteme@example.com',
+          username: 'demoteme',
+          avatar: 'http://example.com/avatar.png',
+          permissions: Permission.ADMIN | Permission.REQUEST,
+          userType: UserType.LOCAL,
+        })
+      );
+      assert.notStrictEqual(user.id, 1);
+
+      const linkedAccount = new LinkedAccount({
+        user,
+        provider: 'test',
+        sub: 'demoteme-sub',
+        username: 'demoteme',
+      });
+      await linkedAccountRepo.save(linkedAccount);
+
+      const settings = getSettings();
+      settings.oidc.providers[0].adminGroup = 'admin';
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        idTokenClaims: claims,
+        userinfoResponse: claims,
+      });
+
+      const response = await performOidcCallback();
+      assert.strictEqual(response.status, 204);
+
+      const updatedUser = await userRepo.findOneOrFail({
+        where: { id: user.id },
+      });
+      assert.strictEqual(
+        (updatedUser.permissions & Permission.ADMIN) === 0,
+        true
+      );
+      assert.strictEqual(
+        (updatedUser.permissions & Permission.REQUEST) !== 0,
+        true
+      );
+    });
+
+    it('does not demote user ID 1 (system owner) when removed from admin group', async function () {
+      const userRepo = getRepository(User);
+      const linkedAccountRepo = getRepository(LinkedAccount);
+
+      // Find user ID 1 (seeded admin)
+      const owner = await userRepo.findOneOrFail({
+        where: { id: 1 },
+      });
+      assert.strictEqual((owner.permissions & Permission.ADMIN) !== 0, true);
+
+      const claims = {
+        sub: 'owner-sub',
+        email: owner.email,
+        groups: ['regular_users'],
+      };
+
+      const linkedAccount = new LinkedAccount({
+        user: owner,
+        provider: 'test',
+        sub: 'owner-sub',
+        username: 'owner',
+      });
+      await linkedAccountRepo.save(linkedAccount);
+
+      const settings = getSettings();
+      settings.oidc.providers[0].adminGroup = 'admin';
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        idTokenClaims: claims,
+        userinfoResponse: claims,
+      });
+
+      const response = await performOidcCallback();
+      assert.strictEqual(response.status, 204);
+
+      const updatedOwner = await userRepo.findOneOrFail({
+        where: { id: 1 },
+      });
+      assert.strictEqual(
+        (updatedOwner.permissions & Permission.ADMIN) !== 0,
+        true
+      );
+    });
+
+    it('respects custom groupClaim and matches path formats (e.g. /admin)', async function () {
+      const settings = getSettings();
+      settings.oidc.providers[0].adminGroup = 'admin';
+      settings.oidc.providers[0].groupClaim = 'realm_access.roles';
+      settings.oidc.providers[0].newUserLogin = true;
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        userinfoResponse: {
+          ...DEFAULT_CLAIMS,
+          email: 'keycloakuser@example.com',
+          sub: 'keycloak-sub',
+          realm_access: {
+            roles: ['/admin', 'default-roles'],
+          },
+        },
+        idTokenClaims: {
+          ...DEFAULT_CLAIMS,
+          email: 'keycloakuser@example.com',
+          sub: 'keycloak-sub',
+        },
+      });
+
+      const response = await performOidcCallback();
+      assert.strictEqual(response.status, 204);
+
+      const userRepo = getRepository(User);
+      const createdUser = await userRepo.findOneOrFail({
+        where: { email: 'keycloakuser@example.com' },
+      });
+      assert.strictEqual(
+        (createdUser.permissions & Permission.ADMIN) !== 0,
+        true
       );
     });
   });

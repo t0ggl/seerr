@@ -20,6 +20,8 @@ describe('Settings OIDC Environment Configuration', () => {
     delete process.env.OIDC_SCOPES;
     delete process.env.OIDC_LOGO;
     delete process.env.OIDC_REQUIRED_CLAIMS;
+    delete process.env.OIDC_ADMIN_GROUP;
+    delete process.env.OIDC_GROUP_CLAIM;
     delete process.env.OIDC_NEW_USER_LOGIN;
     delete process.env.APPLICATION_URL;
     delete process.env.APP_URL;
@@ -98,5 +100,52 @@ describe('Settings OIDC Environment Configuration', () => {
 
     const settings = new Settings();
     assert.equal(settings.main.applicationUrl, 'https://seerr.example.com');
+  });
+
+  it('configures adminGroup and groupClaim via discrete env vars', () => {
+    process.env.OIDC_ISSUER_URL = 'https://id.example.com';
+    process.env.OIDC_CLIENT_ID = 'test-client';
+    process.env.OIDC_ADMIN_GROUP = 'admin';
+    process.env.OIDC_GROUP_CLAIM = 'roles';
+
+    const settings = new Settings();
+    assert.equal(settings.oidc.providers[0].adminGroup, 'admin');
+    assert.equal(settings.oidc.providers[0].groupClaim, 'roles');
+  });
+
+  it('configures adminGroup and groupClaim via OIDC_PROVIDERS JSON', () => {
+    process.env.OIDC_PROVIDERS = JSON.stringify([
+      {
+        slug: 'authentik',
+        issuerUrl: 'https://auth.example.com',
+        clientId: 'authentik-client',
+        adminGroup: 'seerr-admins',
+        groupClaim: 'custom.groups',
+      },
+    ]);
+
+    const settings = new Settings();
+    assert.equal(settings.oidc.providers[0].adminGroup, 'seerr-admins');
+    assert.equal(settings.oidc.providers[0].groupClaim, 'custom.groups');
+  });
+
+  it('applies OIDC_ADMIN_GROUP to existing providers', () => {
+    process.env.OIDC_ADMIN_GROUP = 'administrators';
+    const settings = new Settings();
+    settings.load({
+      oidc: {
+        providers: [
+          {
+            slug: 'oidc',
+            name: 'OIDC',
+            issuerUrl: 'https://example.com',
+            clientId: 'client',
+            clientSecret: 'secret',
+          },
+        ],
+      },
+    });
+
+    assert.equal(settings.oidc.providers[0].adminGroup, 'administrators');
   });
 });
