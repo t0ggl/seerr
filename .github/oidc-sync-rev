@@ -1,0 +1,16 @@
+0aa680565233bcfd67bfa4bce5b12f9f89f134da
+michaelhthomas@outlook.com	test: add additional security tests
+michaelhthomas@outlook.com	fix: add permission check for linked account removal
+michaelhthomas@outlook.com	fix(user): ensure a consistent redirect URL for account linking
+lauris.vanrijn@vitecsoftware.com	fix(auth): sign session cookie store with sessionSecret, not clientId
+michaelhthomas@outlook.com	fix: strip query params when redirecting to provider
+michaelhthomas@outlook.com	fix(oidcloginbutton): ensure router is initialized in callback hook
+michaelhthomas@outlook.com	fix: explicitly set sameSite: strict for OIDC correlation cookies
+michaelhthomas@outlook.com	fix: normalize email addresses from IDP before lookup / storage
+michaelhthomas@outlook.com	fix: only count active OIDC providers as a fallback sign-in method
+michaelhthomas@outlook.com	chore(api): clarify the 403 semantics on linked-account listing
+michaelhthomas@outlook.com	fix: ensure that OIDC correlation cookies are present in callback
+michaelhthomas@outlook.com	fix(auth): always send state regardless of PKCE support
+michaelhthomas@outlook.com	fix(user): filter linkedAccounts from user entity
+michaelhthomas@outlook.com	refactor: remove login-specific classes from ButtonWithLoader
+michaelhthomas@outlook.com	test: add cookie secret to express app for auth tests

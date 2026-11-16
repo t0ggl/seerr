@@ -55,10 +55,12 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch upstream tags and refs
+      - name: Fetch upstream release tag
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
         run: |
           git remote add upstream https://github.com/seerr-team/seerr.git || git remote set-url upstream https://github.com/seerr-team/seerr.git
-          git fetch upstream --tags
+          git fetch --no-tags --force upstream "refs/tags/${TAG}:refs/tags/${TAG}"
 
       - name: Check if already merged
         id: check
@@ -90,6 +92,7 @@ jobs:
           fi
 
       - name: Push merged branch and tag
+        id: push_release
         if: steps.check.outputs.needs_sync == 'true' && steps.merge.outputs.conflict == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -103,9 +106,7 @@ jobs:
           echo "Creating and pushing tag $OIDC_TAG..."
           git tag -a "$OIDC_TAG" -m "Release $TAG with OIDC support"
           git push origin "$OIDC_TAG"
-
-          echo "Triggering GHCR build workflow..."
-          gh workflow run build-ghcr.yml --ref feat/oidc-login-basic || true
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       - name: Notify on merge conflict
         if: steps.check.outputs.needs_sync == 'true' && steps.merge.outputs.conflict == 'true'
@@ -115,5 +116,120 @@ jobs:
           TAG="${{ steps.upstream.outputs.tag }}"
           TITLE="Merge conflict syncing upstream release $TAG"
           BODY="Automated sync detected a new upstream release \`$TAG\`, but a merge conflict occurred when merging into \`feat/oidc-login-basic\`. Please resolve the conflicts manually."
-          gh issue create --title "$TITLE" --body "$BODY" --label "bug" || true
+          EXISTING=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq 'length' || echo "0")
+          if [ "$EXISTING" = "0" ]; then
+            gh issue create --title "$TITLE" --body "$BODY" --label "bug" || true
+          fi
           exit 1
+
+      - name: Sync upstream preview-new-oidc
+        id: sync_preview
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "needs_build=false" >> "$GITHUB_OUTPUT"
+
+          if ! git ls-remote --exit-code upstream refs/tags/preview-new-oidc >/dev/null 2>&1; then
+            echo "Upstream tag preview-new-oidc not found, skipping."
+            exit 0
+          fi
+
+          git fetch --no-tags --force upstream "refs/tags/preview-new-oidc:refs/upstream/preview-new-oidc"
+          NEW_OIDC=$(git rev-parse refs/upstream/preview-new-oidc)
+
+          if [ ! -f .github/oidc-sync-rev ]; then
+            echo "Missing .github/oidc-sync-rev tracking file."
+            exit 1
+          fi
+
+          OLD_OIDC=$(head -n 1 .github/oidc-sync-rev | tr -d '[:space:]')
+          if [ "$OLD_OIDC" = "$NEW_OIDC" ]; then
+            echo "preview-new-oidc is already up to date ($NEW_OIDC)."
+            exit 0
+          fi
+
+          BASE_OIDC=""
+          if git cat-file -e "${OLD_OIDC}^{commit}" 2>/dev/null && git merge-base --is-ancestor "$OLD_OIDC" "$NEW_OIDC"; then
+            BASE_OIDC="$OLD_OIDC"
+            echo "preview-new-oidc fast-forwarded from ${OLD_OIDC:0:8} to ${NEW_OIDC:0:8}."
+          else
+            echo "preview-new-oidc rebased or diverged from ${OLD_OIDC:0:8}; resolving base against upstream/develop..."
+            git fetch --no-tags --force upstream "refs/heads/develop:refs/upstream/develop"
+            PR_BASE=$(git merge-base refs/upstream/develop "$NEW_OIDC")
+
+            CANDIDATES=$(git log --first-parent --no-merges --format='%H%x09%ae%x09%s' "${PR_BASE}..${NEW_OIDC}" || true)
+            while IFS=$'\t' read -r old_email old_subject; do
+              [ -n "${old_email}${old_subject}" ] || continue
+              matched_sha=$(OLD_EMAIL="$old_email" OLD_SUBJECT="$old_subject" awk -F'\t' 'tolower($2) == ENVIRON["OLD_EMAIL"] && $3 == ENVIRON["OLD_SUBJECT"] { print $1; exit }' <<< "$CANDIDATES")
+              if [ -n "$matched_sha" ]; then
+                BASE_OIDC="$matched_sha"
+                echo "Matched previous sync point ($old_subject) at ${BASE_OIDC:0:8}."
+                break
+              fi
+            done < <(tail -n +2 .github/oidc-sync-rev)
+
+            if [ -z "$BASE_OIDC" ]; then
+              TITLE="Manual review needed: preview-new-oidc history rewritten (${NEW_OIDC:0:8})"
+              EXISTING=$(gh issue list --state open --search "in:title \"Manual review needed: preview-new-oidc history rewritten\"" --json number --jq 'length' || echo "0")
+              if [ "$EXISTING" = "0" ]; then
+                BODY="Automated sync detected that upstream \`preview-new-oidc\` moved to \`$NEW_OIDC\`, but could not locate the previous sync point (\`$OLD_OIDC\`) after rebase/squash. Please inspect and port any new changes manually, then update \`.github/oidc-sync-rev\`."
+                gh issue create --title "$TITLE" --body "$BODY" --label "bug" || true
+              fi
+              exit 1
+            fi
+          fi
+
+          COMMITS=$(git rev-list --reverse --first-parent --no-merges "${BASE_OIDC}..${NEW_OIDC}")
+          START_HEAD=$(git rev-parse HEAD)
+          APPLIED=0
+
+          for COMMIT in $COMMITS; do
+            SUBJECT=$(git show -s --format='%s' "$COMMIT")
+            echo "Cherry-picking ${COMMIT:0:8}: $SUBJECT"
+            if git cherry-pick -x "$COMMIT"; then
+              APPLIED=$((APPLIED + 1))
+            elif [ -z "$(git ls-files -u)" ] && git diff --quiet && git diff --cached --quiet; then
+              echo "Commit ${COMMIT:0:8} is already applied; skipping."
+              git cherry-pick --skip
+            else
+              echo "Merge conflict cherry-picking ${COMMIT:0:8}: $SUBJECT"
+              git cherry-pick --abort || true
+              git reset --hard "$START_HEAD"
+              TITLE="Merge conflict syncing preview-new-oidc (${COMMIT:0:8})"
+              EXISTING=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq 'length' || echo "0")
+              if [ "$EXISTING" = "0" ]; then
+                BODY="Automated sync detected new commit \`$COMMIT\` (\`$SUBJECT\`) on upstream \`preview-new-oidc\` (\`$NEW_OIDC\`), but a merge conflict occurred when cherry-picking it into \`feat/oidc-login-basic\`. Please resolve the conflicts manually and update \`.github/oidc-sync-rev\`."
+                gh issue create --title "$TITLE" --body "$BODY" --label "bug" || true
+              fi
+              exit 1
+            fi
+          done
+
+          {
+            echo "$NEW_OIDC"
+            git log -n 15 --first-parent --no-merges --format='%ae%x09%s' "$NEW_OIDC" | awk -F'\t' '{print tolower($1) "\t" $2}'
+          } > .github/oidc-sync-rev
+
+          if ! git diff --quiet .github/oidc-sync-rev; then
+            git add .github/oidc-sync-rev
+            if [ "$APPLIED" -gt 0 ]; then
+              git commit -m "chore(oidc): sync preview-new-oidc (${NEW_OIDC:0:8})"
+            else
+              git commit -m "chore(oidc): update preview-new-oidc sync marker (${NEW_OIDC:0:8})"
+            fi
+            echo "Pushing updated feat/oidc-login-basic to origin..."
+            git push origin feat/oidc-login-basic
+          fi
+
+          if [ "$APPLIED" -gt 0 ]; then
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger GHCR build workflow
+        if: always() && (steps.push_release.outputs.pushed == 'true' || steps.sync_preview.outputs.needs_build == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Triggering GHCR build workflow..."
+          gh workflow run build-ghcr.yml --ref feat/oidc-login-basic || true
